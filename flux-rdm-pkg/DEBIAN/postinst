@@ -1,0 +1,5 @@
+#!/bin/bash
+set -e
+echo "Loading Flux RDM Docker image into local engine..."
+docker load -i /opt/flux-rdm/image.tar.gz
+update-desktop-database /usr/share/applications || true

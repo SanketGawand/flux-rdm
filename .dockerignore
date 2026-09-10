@@ -1,0 +1,7 @@
+flux-rdm-pkg/
+nexus-rdm-pkg/
+*.deb
+*.tar.gz
+__pycache__/
+*.pyc
+.git

@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# Resolve Display for GNOME/Wayland app drawers
+if [ -z "$DISPLAY" ]; then
+export DISPLAY=$(ls /tmp/.X11-unix/X* 2>/dev/null | head -n 1 | sed 's|/tmp/.X11-unix/X|:|')
+export DISPLAY="${DISPLAY:-:0}"
+fi
+
+USER_DATA="${HOME}/.local/share/flux-rdm/data"
+USER_IMPORTS="${HOME}/.local/share/flux-rdm/imports"
+mkdir -p "${USER_DATA}" "${USER_IMPORTS}"
+chmod -R a+rwX "${USER_DATA}" "${USER_IMPORTS}" 2>/dev/null || true
+
+xhost +local: >/dev/null 2>&1 || true
+
+# Execute container (randomly named to prevent multi-click crashes)
+exec docker run --rm \
+--net=host \
+--ipc=host \
+-e DISPLAY="${DISPLAY}" \
+-e QT_QPA_PLATFORM=xcb \
+-v /tmp/.X11-unix:/tmp/.X11-unix:ro \
+-v "${USER_DATA}:/home/appuser/data" \
+-v "${USER_IMPORTS}:/home/appuser/imports" \
+flux-rdm:latest "$@"

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Flux RDM
+Comment=Containerized Remote Desktop Manager
+Exec=/usr/bin/flux-rdm
+Icon=flux-rdm
+Terminal=false
+Type=Application
+Categories=Network;RemoteAccess;Development;
+StartupNotify=true
+StartupWMClass=flux-rdm

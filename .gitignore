@@ -1,0 +1,19 @@
+# Local databases
+data/*.db
+*.db
+
+# Build artifacts & package outputs
+*.deb
+*.tar.gz
+flux-rdm-pkg/opt/flux-rdm/*.tar.gz
+
+# Local data & user imports
+imports/
+
+# Python cache & virtual environments
+__pycache__/
+*.pyc
+.venv/
+venv/
+.idea/
+.vscode/

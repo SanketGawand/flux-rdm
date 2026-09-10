@@ -1,0 +1,6 @@
+Package: flux-rdm
+Version: 1.0.0
+Architecture: all
+Maintainer: DevOps Team
+Description: Containerized Remote Desktop Manager
+Depends: docker.io | docker-ce

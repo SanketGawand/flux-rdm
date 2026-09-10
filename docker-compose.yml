@@ -1,0 +1,20 @@
+services:
+  flux-rdm:
+    build: .
+    image: flux-rdm:latest
+    container_name: flux-rdm
+    network_mode: "host"
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_QPA_PLATFORM=xcb
+      - PYTHONPATH=/
+      - XDG_RUNTIME_DIR=/tmp/runtime-appuser
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:ro
+      - ~/.Xauthority:/home/appuser/.Xauthority:ro
+      - ./data:/home/appuser/data
+      - ./imports:/home/appuser/imports
+    tmpfs:
+      - /tmp/runtime-appuser:mode=0700,uid=1000,gid=1000
+    ipc: host
+    restart: "no"
