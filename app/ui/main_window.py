@@ -1,4 +1,5 @@
 import sys
+import subprocess
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
@@ -14,9 +15,10 @@ from app.storage.database import Database
 from app.parser import parse_rdm_file
 from app.exporter import export_to_csv, export_to_rdm, export_to_rdp_bundle
 from app.ui.rdp_viewer import RDPViewerWidget
-from app.ui.edit_dialog import EditConnectionDialog, VaultEntryDialog, AssignFolderVaultDialog
+from app.ui.ps_viewer import PSViewerWidget
+from app.ui.edit_dialog import EditConnectionDialog, VaultEntryDialog, AssignFolderVaultDialog, render_svg_icon
 from app.ui.dashboard_view import DashboardView
-from app.ui.theme import KEY_ICON, LOGO_SVG
+from app.ui.theme import KEY_ICON, LOGO_SVG, TERMINAL_ICON, ShineOverlay
 
 
 def show_independent_question(title: str, message: str) -> bool:
@@ -101,7 +103,7 @@ def show_independent_info(title: str, message: str):
 class MainWindow(QMainWindow):
     EXPANDED_WIDTH = 356
     COLLAPSED_WIDTH = 54
-    MIN_SIDEBAR_WIDTH = 256  # 240px logo width + 16px margins to prevent logo shrinking
+    MIN_SIDEBAR_WIDTH = 256
     MAX_SIDEBAR_WIDTH = 750
 
     VAULT_COLLAPSED_HEIGHT = 36
@@ -118,6 +120,10 @@ class MainWindow(QMainWindow):
         self.last_sidebar_width = self.EXPANDED_WIDTH
         self._picker_process = None
         self.empty_folders = set()
+        
+        # State tracking for smart search expansion
+        self._pre_search_states = {}
+        self._is_searching = False
 
         self._build_ui()
         self._load_connections_to_tree()
@@ -139,7 +145,6 @@ class MainWindow(QMainWindow):
         self.sidebar_layout.setSpacing(10)
         self.sidebar_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        # Logo container with safe size policy preventing layout width panic
         self.logo_container = QWidget()
         self.logo_container.setFixedSize(240, 52)
         self.logo_container.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -152,6 +157,9 @@ class MainWindow(QMainWindow):
         self.logo_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.logo_widget.setStyleSheet("background: transparent;")
         
+        # Self-animating shine overlay
+        self.shine_overlay = ShineOverlay(self.logo_widget)
+        
         self.logo_opacity = QGraphicsOpacityEffect(self.logo_widget)
         self.logo_widget.setGraphicsEffect(self.logo_opacity)
         self.logo_opacity.setOpacity(1.0)
@@ -159,13 +167,11 @@ class MainWindow(QMainWindow):
         logo_layout.addWidget(self.logo_widget)
         self.sidebar_layout.addWidget(self.logo_container)
 
-        # Placeholder spacer matching logo height for collapsed state layout stability
         self.logo_placeholder = QWidget()
         self.logo_placeholder.setFixedHeight(52)
         self.logo_placeholder.setVisible(False)
         self.sidebar_layout.addWidget(self.logo_placeholder)
 
-        # Header Row containing Hamburger Button and Import/Export Controls below Logo
         self.header_row = QWidget()
         self.header_row.setFixedHeight(34)
         self.header_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -251,7 +257,6 @@ class MainWindow(QMainWindow):
         self.search_bar.textChanged.connect(self._filter_tree)
         slider_layout.addWidget(self.search_bar)
 
-        # --- Top Section: Sessions Header and Tree ---
         sessions_header_layout = QHBoxLayout()
         sessions_header_layout.setContentsMargins(0, 4, 0, 0)
         sessions_header_layout.setSpacing(4)
@@ -288,7 +293,6 @@ class MainWindow(QMainWindow):
         self.tree_view.doubleClicked.connect(self._on_tree_double_clicked)
         slider_layout.addWidget(self.tree_view, 1)
 
-        # --- Bottom Section: Collapsible Vault Container ---
         self.vault_container = QWidget()
         self.vault_container.setFixedHeight(self.VAULT_COLLAPSED_HEIGHT)
         vault_layout = QVBoxLayout(self.vault_container)
@@ -343,6 +347,7 @@ class MainWindow(QMainWindow):
         self.dashboard_tab = DashboardView(self.db, self)
         self.dashboard_tab.import_requested.connect(self._handle_import)
         self.dashboard_tab.vault_create_requested.connect(self._create_vault_entry)
+        self.dashboard_tab.ps_launch_requested.connect(self._launch_powershell)
 
         self.tab_widget.addTab(self.dashboard_tab, "Dashboard")
         self.tab_widget.tabBar().setTabButton(0, QTabBar.ButtonPosition.RightSide, None)
@@ -725,7 +730,7 @@ class MainWindow(QMainWindow):
                     path = self.tree_model.data(idx, Qt.ItemDataRole.UserRole + 1)
                     if path:
                         expanded_paths.add(path)
-                    _capture_expanded(idx)
+                _capture_expanded(idx)
                     
         _capture_expanded(QModelIndex())
 
@@ -776,24 +781,73 @@ class MainWindow(QMainWindow):
             if path in expanded_paths:
                 self.tree_view.expand(folder_item.index())
 
-    def _filter_tree(self, query: str):
-        query = query.lower().strip()
-        for i in range(self.tree_model.rowCount()):
-            item = self.tree_model.item(i)
-            self._filter_item_recursive(item, query)
+    def _filter_tree(self, text: str):
+        text = text.lower().strip()
+        root = self.tree_model.invisibleRootItem()
 
-    def _filter_item_recursive(self, item: QStandardItem, query: str) -> bool:
-        text_matches = query in item.text().lower()
-        child_matches = False
+        if not text:
+            self._restore_tree_state(root)
+            self._is_searching = False
+            return
+
+        if not self._is_searching:
+            self._pre_search_states.clear()
+            self._save_tree_state(root)
+            self._is_searching = True
+
+        for r in range(root.rowCount()):
+            self._apply_smart_filter(root.child(r), text)
+
+    def _save_tree_state(self, parent_item: QStandardItem):
+        for r in range(parent_item.rowCount()):
+            child = parent_item.child(r)
+            if child.hasChildren():
+                self._pre_search_states[id(child)] = self.tree_view.isExpanded(child.index())
+                self._save_tree_state(child)
+
+    def _restore_tree_state(self, parent_item: QStandardItem):
+        for r in range(parent_item.rowCount()):
+            child = parent_item.child(r)
+            self.tree_view.setRowHidden(r, parent_item.index(), False)
+            if child.hasChildren():
+                was_expanded = self._pre_search_states.get(id(child), False)
+                self.tree_view.setExpanded(child.index(), was_expanded)
+                self._restore_tree_state(child)
+
+    def _apply_smart_filter(self, item: QStandardItem, text: str) -> bool:
+        item_matches = text in item.text().lower()
+        has_matching_child = False
+
+        parent_idx = item.parent().index() if item.parent() else QModelIndex()
+
+        if not item.hasChildren():
+            self.tree_view.setRowHidden(item.row(), parent_idx, not item_matches)
+            return item_matches
 
         for r in range(item.rowCount()):
-            if self._filter_item_recursive(item.child(r), query):
-                child_matches = True
+            child = item.child(r)
+            if self._apply_smart_filter(child, text):
+                has_matching_child = True
 
-        visible = text_matches or child_matches
-        index = item.index()
-        self.tree_view.setRowHidden(index.row(), index.parent(), not visible)
-        return visible
+        if has_matching_child:
+            self.tree_view.setRowHidden(item.row(), parent_idx, False)
+            self.tree_view.setExpanded(item.index(), True)
+            return True
+        elif item_matches:
+            self.tree_view.setRowHidden(item.row(), parent_idx, False)
+            self.tree_view.setExpanded(item.index(), True)
+            self._unhide_all_children(item)
+            return True
+        else:
+            self.tree_view.setRowHidden(item.row(), parent_idx, True)
+            return False
+
+    def _unhide_all_children(self, item: QStandardItem):
+        for r in range(item.rowCount()):
+            child = item.child(r)
+            self.tree_view.setRowHidden(r, item.index(), False)
+            if child.hasChildren():
+                self._unhide_all_children(child)
 
     def _handle_import(self):
         self._picker_process = QProcess(self)
@@ -940,18 +994,25 @@ class MainWindow(QMainWindow):
         conn = self.db.get_by_id(conn_id)
         conn_name = conn.get("name", "Session") if conn else "Session"
 
-        act_open = QAction("Connect (Windowed)", self)
-        act_fs = QAction("Connect (Full Screen - Grab All Keys)", self)
+        act_open = QAction("Connect RDP (Windowed)", self)
+        act_fs = QAction("Connect RDP (Full Screen)", self)
+        
+        # Load terminal icon dynamically for PowerShell action
+        term_icon_str = TERMINAL_ICON.read_text(encoding='utf-8') if TERMINAL_ICON.exists() else ""
+        act_ps = QAction(render_svg_icon(term_icon_str), "Connect PowerShell (WinRM)", self) if term_icon_str else QAction("Connect PowerShell (WinRM)", self)
+        
         act_edit = QAction("Edit Connection...", self)
         act_delete_entry = QAction(f"Delete '{conn_name}'", self)
 
         act_open.triggered.connect(lambda: self._launch_session(conn_id, fullscreen=False))
         act_fs.triggered.connect(lambda: self._launch_session(conn_id, fullscreen=True))
+        act_ps.triggered.connect(lambda: self._launch_powershell(conn_id))
         act_edit.triggered.connect(lambda: self._edit_connection(conn_id))
         act_delete_entry.triggered.connect(lambda: self._delete_connection_action(conn_id, conn_name))
 
         menu.addAction(act_open)
         menu.addAction(act_fs)
+        menu.addAction(act_ps)
         menu.addSeparator()
         menu.addAction(act_edit)
         menu.addSeparator()
@@ -1042,14 +1103,42 @@ class MainWindow(QMainWindow):
         if conn.get("credential_id"):
             vault_cred = self.db.get_vault_cred(conn["credential_id"])
             if vault_cred:
+                if conn.get("domain"):
+                    conn["domain"] = conn["domain"]
+                else:
+                    conn["domain"] = vault_cred.get("domain", "")
                 conn["username"] = vault_cred.get("username", "")
-                conn["domain"] = vault_cred.get("domain", "")
                 conn["password"] = vault_cred.get("password", "")
 
         viewer = RDPViewerWidget(conn, fullscreen=fullscreen)
         viewer.request_close.connect(self._close_viewer_tab)
 
         tab_index = self.tab_widget.addTab(viewer, f"{conn['name']}")
+        self.tab_widget.setCurrentIndex(tab_index)
+        viewer.start_session()
+        self.dashboard_tab.refresh_stats()
+
+    def _launch_powershell(self, conn_id: str):
+        conn = self.db.get_by_id(conn_id)
+        if not conn:
+            return
+
+        self.db.record_session_launch(conn_id)
+
+        if conn.get("credential_id"):
+            vault_cred = self.db.get_vault_cred(conn["credential_id"])
+            if vault_cred:
+                if conn.get("domain"):
+                    conn["domain"] = conn["domain"]
+                else:
+                    conn["domain"] = vault_cred.get("domain", "")
+                conn["username"] = vault_cred.get("username", "")
+                conn["password"] = vault_cred.get("password", "")
+
+        viewer = PSViewerWidget(conn)
+        viewer.request_close.connect(self._close_viewer_tab)
+
+        tab_index = self.tab_widget.addTab(viewer, f">_ {conn['name']}")
         self.tab_widget.setCurrentIndex(tab_index)
         viewer.start_session()
         self.dashboard_tab.refresh_stats()
@@ -1073,5 +1162,9 @@ class MainWindow(QMainWindow):
 
         widget = self.tab_widget.widget(index)
         if widget:
-            widget.close()
+            # widget.close() triggers the viewer's closeEvent.
+            # If the user clicks 'Cancel' in the popup, it returns False and we abort the tab closure.
+            if not widget.close():
+                return
+                
         self.tab_widget.removeTab(index)
