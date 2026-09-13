@@ -1,4 +1,9 @@
+import sys
+import subprocess
 from pathlib import Path
+from PyQt6.QtWidgets import QWidget
+from PyQt6.QtGui import QPainter, QLinearGradient, QColor, QImage
+from PyQt6.QtCore import Qt, QPropertyAnimation, pyqtProperty
 
 ICON_DIR = Path("/tmp/flux_icons")
 ICON_DIR.mkdir(parents=True, exist_ok=True)
@@ -12,6 +17,7 @@ CLOSE_ICON = ICON_DIR / "close.svg"
 CLOSE_HOVER_ICON = ICON_DIR / "close-hover.svg"
 LOGO_SVG = ICON_DIR / "flux-logo.svg"
 CEX_LOGO_SVG = ICON_DIR / "cex-logo.svg"
+TERMINAL_ICON = ICON_DIR / "terminal.svg"
 
 if not CHEVRON_RIGHT.exists():
     CHEVRON_RIGHT.write_text(
@@ -76,6 +82,14 @@ if not CLOSE_HOVER_ICON.exists():
         '</svg>'
     )
 
+if not TERMINAL_ICON.exists():
+    TERMINAL_ICON.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" '
+        'stroke="#1f6feb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+        '<polyline points="4 17 10 11 4 5"/>'
+        '<line x1="12" y1="19" x2="20" y2="19"/>'
+        '</svg>'
+    )
 
 if not LOGO_SVG.exists():
     LOGO_SVG.write_text("""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 280 64" fill="none">
@@ -542,3 +556,69 @@ MODERN_STYLE = (
     .replace("__CLOSE_ICON__", CLOSE_ICON.as_posix())
     .replace("__CLOSE_HOVER_ICON__", CLOSE_HOVER_ICON.as_posix())
 )
+
+class ShineOverlay(QWidget):
+    """A transparent overlay that paints a self-animating sweeping shine effect mapped strictly to the SVG outline."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        
+        if parent:
+            self.setFixedSize(parent.size())
+
+        self._offset = -120.0
+        
+        self.anim = QPropertyAnimation(self, b"offset")
+        self.anim.setDuration(4000)
+        self.anim.setStartValue(-120.0)
+        self.anim.setEndValue(600.0)
+        self.anim.setLoopCount(-1)
+        self.anim.start()
+
+    @pyqtProperty(float)
+    def offset(self):
+        return self._offset
+
+    @offset.setter
+    def offset(self, val):
+        self._offset = val
+        self.update()
+
+    def paintEvent(self, event):
+        parent = self.parent()
+        if not parent or not hasattr(parent, 'renderer'):
+            return
+
+        # 1. Create a transparent buffer image matching the widget size
+        img = QImage(self.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        img.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(img)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # 2. Render the actual SVG into the buffer to act as our alpha mask
+        parent.renderer().render(painter)
+
+        # 3. Switch to SourceIn mode (only keeps pixels where the SVG already drew something)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+
+        # 4. Draw the sweeping shine effect
+        shine_width = 45.0
+        painter.translate(self._offset, 0)
+        painter.shear(-0.4, 0.0) 
+        
+        gradient = QLinearGradient(0, 0, shine_width, 0)
+        gradient.setColorAt(0.0, QColor(255, 255, 255, 0))
+        gradient.setColorAt(0.5, QColor(255, 255, 255, 120))  # Slightly brighter so it pops inside the thin vectors
+        gradient.setColorAt(1.0, QColor(255, 255, 255, 0))
+
+        painter.setBrush(gradient)
+        painter.setPen(Qt.PenStyle.NoPen)
+        
+        # We draw a very tall rectangle to ensure the shear angle doesn't clip the top/bottom
+        painter.drawRect(0, -self.height(), int(shine_width), self.height() * 3)
+        painter.end()
+
+        # 5. Finally, draw the masked buffer directly onto the overlay widget
+        widget_painter = QPainter(self)
+        widget_painter.drawImage(0, 0, img)

@@ -3,6 +3,7 @@ services:
     build: .
     image: flux-rdm:latest
     container_name: flux-rdm
+    # Removed user directive so container boots as root, fixes permissions, and steps down to appuser via gosu
     network_mode: "host"
     environment:
       - DISPLAY=${DISPLAY}
@@ -14,6 +15,7 @@ services:
       - ~/.Xauthority:/home/appuser/.Xauthority:ro
       - ./data:/home/appuser/data
       - ./imports:/home/appuser/imports
+      - /opt/flux-shared:/app/shared
     tmpfs:
       - /tmp/runtime-appuser:mode=0700,uid=1000,gid=1000
     ipc: host

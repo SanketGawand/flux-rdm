@@ -1,6 +1,7 @@
 import subprocess
 import shutil
 import shlex
+import os
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, 
     QLabel, QPushButton, QDialog, QMessageBox, QFrame
@@ -48,6 +49,85 @@ class ProcessWorker(QThread):
                     pass
 
 
+class ConfirmCloseDialog(QDialog):
+    """Independently movable dialog to confirm closing an active session."""
+    def __init__(self, title: str, description: str):
+        super().__init__(None)
+        self.setWindowTitle(title)
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowTitleHint |
+            Qt.WindowType.WindowCloseButtonHint |
+            Qt.WindowType.CustomizeWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.resize(420, 160)
+        self.user_choice = False
+
+        self._init_ui(title, description)
+
+    def _init_ui(self, title: str, description: str):
+        self.setStyleSheet("""
+            QDialog { background-color: #0d1117; }
+            QPushButton#DangerBtn { background-color: #da3633; color: white; border-radius: 6px; padding: 6px 16px; font-weight: 600; }
+            QPushButton#GhostBtn { background-color: transparent; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 16px; font-weight: 600; }
+            QPushButton#GhostBtn:hover { background-color: #21262d; }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(16)
+
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(14)
+
+        icon_label = QLabel("⚠️")
+        icon_label.setStyleSheet("font-size: 28px; background: transparent;")
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(6)
+
+        heading = QLabel(title)
+        heading.setStyleSheet("font-size: 15px; font-weight: 700; color: #e6edf3; background: transparent;")
+
+        body = QLabel(description)
+        body.setStyleSheet("font-size: 13px; color: #8b949e; line-height: 1.4; background: transparent;")
+        body.setWordWrap(True)
+
+        text_layout.addWidget(heading)
+        text_layout.addWidget(body)
+
+        content_layout.addWidget(icon_label)
+        content_layout.addLayout(text_layout, 1)
+        layout.addLayout(content_layout)
+
+        layout.addStretch()
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setObjectName("GhostBtn")
+        cancel_btn.clicked.connect(self._on_cancel)
+
+        confirm_btn = QPushButton("Close Session")
+        confirm_btn.setObjectName("DangerBtn")
+        confirm_btn.clicked.connect(self._on_confirm)
+
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addWidget(confirm_btn)
+        layout.addLayout(btn_layout)
+
+    def _on_cancel(self):
+        self.user_choice = False
+        self.reject()
+
+    def _on_confirm(self):
+        self.user_choice = True
+        self.accept()
+
+
 class IndependentErrorDialog(QDialog):
     """Independently movable dialog for session alerts and errors."""
     def __init__(self, title: str, description: str):
@@ -66,6 +146,13 @@ class IndependentErrorDialog(QDialog):
         self._init_ui(title, description)
 
     def _init_ui(self, title: str, description: str):
+        self.setStyleSheet("""
+            QDialog { background-color: #0d1117; }
+            QPushButton#PrimaryBtn { background-color: #238636; color: white; border-radius: 6px; padding: 6px 16px; font-weight: 600; }
+            QPushButton#GhostBtn { background-color: transparent; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 16px; font-weight: 600; }
+            QPushButton#GhostBtn:hover { background-color: #21262d; }
+        """)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(16)
@@ -81,10 +168,10 @@ class IndependentErrorDialog(QDialog):
         text_layout.setSpacing(6)
 
         heading = QLabel(title)
-        heading.setStyleSheet("font-size: 15px; font-weight: 700; color: #f85149;")
+        heading.setStyleSheet("font-size: 15px; font-weight: 700; color: #f85149; background: transparent;")
 
         body = QLabel(description)
-        body.setStyleSheet("font-size: 13px; color: #c9d1d9; line-height: 1.4;")
+        body.setStyleSheet("font-size: 13px; color: #c9d1d9; line-height: 1.4; background: transparent;")
         body.setWordWrap(True)
 
         text_layout.addWidget(heading)
@@ -139,6 +226,8 @@ class RDPViewerWidget(QWidget):
         self.worker = None
         self._connected = False
         self._window_poll_timer = None
+        self._expected_exit = False
+        self._is_closing = False
 
         self._init_ui()
 
@@ -265,11 +354,11 @@ class RDPViewerWidget(QWidget):
                 self.instructions.setText(
                     "The remote desktop session is running in an independent window.<br><br>"
                     "• <b>Floatbar:</b> Move the cursor to the top edge of the window to access session controls.<br>"
-                    "• <b>Dynamic Scaling:</b> Resizing the remote window automatically adjusts resolution."
+                    "• <b>Dynamic Scaling:</b> Resizing the remote window automatically adjusts resolution.<br>"
+                    "• <b>File Transfer:</b> Use the 'FluxShared' drive in This PC to move files to your mapped host folder."
                 )
 
     def _check_window_presence(self):
-        """Checks X11 directly via wmctrl or xdotool to verify window is actively mapped."""
         if not self.worker or not self.worker.process or self.worker.process.poll() is not None:
             return
 
@@ -319,6 +408,8 @@ class RDPViewerWidget(QWidget):
     def start_session(self):
         display_name = self.session_data.get("name", "Host")
         self._connected = False
+        self._expected_exit = False
+        self._is_closing = False
 
         if self._window_poll_timer and self._window_poll_timer.isActive():
             self._window_poll_timer.stop()
@@ -365,46 +456,51 @@ class RDPViewerWidget(QWidget):
         self._window_poll_timer.timeout.connect(self._check_window_presence)
         self._window_poll_timer.start(250)
 
+    def _get_error_details(self, exit_code: int) -> tuple[str, str]:
+        host = self.session_data.get('host', 'Unknown')
+        port = self.session_data.get('port', 3389)
+
+        if exit_code == 131:
+            return "Authentication Failed", f"Code 131: The credentials provided for {host} were rejected by the server."
+        elif exit_code == 141:
+            return "Connection Refused", f"Code 141: Host {host} refused the connection on port {port}."
+        elif exit_code == 132:
+            return "Certificate Error", f"Code 132: Network Level Authentication (NLA) or certificate negotiation failed for {host}."
+        elif exit_code == 119:
+            return "Protocol Error", f"Code 119: RDP protocol negotiation failed. The server might not support the requested graphics pipeline."
+        else:
+            return "Connection Failed", f"Code {exit_code}: An unexpected network or protocol error occurred while connecting to {host}."
+
     def _on_process_finished(self, exit_code: int):
+        # Ignore process exits that we triggered intentionally by closing the tab
+        if getattr(self, '_is_closing', False):
+            return
+
         self.log(f"\n[*] Process exited with code: {exit_code}")
         self._connected = False
 
         if self._window_poll_timer and self._window_poll_timer.isActive():
             self._window_poll_timer.stop()
 
-        USER_DISCONNECT_CODES = {0, 11, 12, 130, 143}
+        USER_DISCONNECT_CODES = {0, 11, 12, 15, 130, 143}
 
         if exit_code in USER_DISCONNECT_CODES:
-            self.status_badge.setText("● DISCONNECTED")
-            self.status_badge.setStyleSheet("color: #8b949e; font-size: 11px; font-weight: 700; letter-spacing: 0.8px;")
-            self.session_title.setText(f"Session closed normally (Code {exit_code})")
-            self.session_title.setStyleSheet("color: #8b949e; font-size: 16px; font-weight: 600;")
-            self.instructions.setText("The remote session has been closed. Click <b>Relaunch Window</b> to reconnect.")
+            self._expected_exit = True
+            self.request_close.emit(self)
             return
 
-        reasons = {
-            148: ("Password Expired", "Active Directory reports the password must be reset."),
-            145: ("Display Negotiation Error", "Resolution or fullscreen display parameters were rejected by server."),
-            141: ("Connection Refused", f"Host {self.session_data.get('host')} refused the connection on port {self.session_data.get('port')}."),
-            134: ("Authentication Failed", "Windows rejected credentials (ERRCONNECT_LOGON_FAILURE)."),
-            131: ("Connection Timeout", f"TCP connection to {self.session_data.get('host')} timed out."),
-            23:  ("CLI Syntax Error", "Invalid parameter passed to FreeRDP."),
-            22:  ("Argument Value Error", "Unsupported parameter value passed to FreeRDP."),
-            20:  ("Authentication Failed", "Invalid credentials. Verify username, domain, or password."),
-            1:   ("General Connection Error", f"Failed to establish connection to {self.session_data.get('host')}.")
-        }
-
-        title, desc = reasons.get(exit_code, ("Connection Failed", f"Session terminated with exit code {exit_code}."))
+        error_title, error_desc = self._get_error_details(exit_code)
+        display_desc = error_desc.split(': ', 1)[-1]
 
         self.status_badge.setText("● CONNECTION FAILED")
         self.status_badge.setStyleSheet("color: #f85149; font-size: 11px; font-weight: 700; letter-spacing: 0.8px;")
         
-        self.session_title.setText(f"Error {exit_code}: {title} — {desc}")
-        self.session_title.setStyleSheet("color: #f85149; font-size: 15px; font-weight: 600;")
+        self.session_title.setText(f"Error {exit_code}: {error_title} — {display_desc}")
+        self.session_title.setStyleSheet("color: #f85149; font-size: 16px; font-weight: 600;")
         
         self.instructions.setText("Click <b>Relaunch Window</b> to retry or click <b>Show Log</b> above to inspect detailed debug output.")
 
-        self.show_error_dialog(title, f"Code {exit_code}: {desc}")
+        self.show_error_dialog(error_title, error_desc)
 
     def show_error_dialog(self, title: str, description: str):
         dialog = IndependentErrorDialog(title, description)
@@ -417,20 +513,30 @@ class RDPViewerWidget(QWidget):
 
     def _build_freerdp_command(self, binary: str) -> list:
         s = self.session_data
+        local_share = "/app/shared"
+        
+        try:
+            if not os.path.exists(local_share):
+                os.makedirs(local_share, exist_ok=True)
+        except Exception:
+            pass
+
         args = [
             binary,
             f"/v:{s['host']}:{s['port']}",
             "/cert:ignore",
             "+clipboard",
+            f"/drive:FluxShared,{local_share}",
             "+auto-reconnect",
             "/audio-mode:0",
-            "+fonts",
-            "+aero",
-            "/gdi:hw",
+            "/network:auto",
+            "/compression",
+            "-themes",
+            "-wallpaper",
             f"/t:{s.get('name', 'Remote Session')} - Flux RDM",
             "/floatbar:sticky:off,default:visible,show:always",
             "+toggle-fullscreen",
-            "/wm-class:flux-rdm",  # <--- THIS IS THE ADDED LINE
+            "/wm-class:flux-rdm",
         ]
 
         user = s.get("username", "").strip()
@@ -466,9 +572,27 @@ class RDPViewerWidget(QWidget):
         return args
 
     def closeEvent(self, event):
+        # 1. Ask for confirmation ONLY if the session is actively running
+        if self.worker and self.worker.isRunning():
+            dialog = ConfirmCloseDialog(
+                "Close Active Session", 
+                "Are you sure you want to close this session? This will immediately disconnect the remote host."
+            )
+            dialog.exec()
+            
+            if not dialog.user_choice:
+                # User canceled, keep the tab open
+                event.ignore()
+                return
+                
+        # 2. Proceed with closing silently
+        self._is_closing = True
+        
         if self._window_poll_timer and self._window_poll_timer.isActive():
             self._window_poll_timer.stop()
+            
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait(1000)
+                
         super().closeEvent(event)
